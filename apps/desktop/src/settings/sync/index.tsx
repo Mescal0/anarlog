@@ -15,13 +15,10 @@ import {
   CheckCircle,
   CircleNotch,
   CloudSlash,
-  Desktop,
-  DeviceMobile,
   PencilSimple,
   Plugs,
   Plus,
   Warning,
-  Watch,
 } from "@anlg/ui/components/icons";
 import { Badge } from "@anlg/ui/components/ui/badge";
 import { Button } from "@anlg/ui/components/ui/button";
@@ -39,7 +36,6 @@ import { toast } from "@anlg/ui/components/ui/toast";
 import { cn, formatDistanceToNow } from "@anlg/utils";
 
 import { E2eeSetupDialog } from "../general/e2ee-setup";
-import { resolveDeviceKind } from "./device-kind";
 import { SyncHealthSection } from "./health";
 import { SyncLog } from "./log";
 
@@ -52,7 +48,10 @@ import {
   refreshCloudsyncForSession,
   subscribeCloudsyncCredentialBlock,
 } from "~/auth/cloudsync";
-import { getDeviceIdentity } from "~/auth/cloudsync-credentials";
+import {
+  getDeviceIdentity,
+  setCredentialBlock,
+} from "~/auth/cloudsync-credentials";
 import { ConnectLocalLibraryDialog } from "~/auth/connect-local-library-dialog";
 import {
   registerDeviceEnrollment,
@@ -68,6 +67,7 @@ import {
   useStoredSettingValuesQuery,
 } from "~/settings/queries";
 import { resolveConfigValue } from "~/shared/config";
+import { isKeychainAccessError, repairKeychainAccess } from "~/shared/keychain";
 import { buildWebAppUrl } from "~/shared/utils";
 import { useTabs } from "~/store/zustand/tabs";
 
@@ -208,29 +208,6 @@ function RenameDeviceDialog({
         </form>
       </DialogContent>
     </Dialog>
-  );
-}
-
-const DEVICE_KIND_ICONS = {
-  desktop: Desktop,
-  mobile: DeviceMobile,
-  watch: Watch,
-} as const;
-
-function DeviceKindIcon({
-  kind,
-  name,
-}: {
-  kind?: string | null;
-  name: string | null;
-}) {
-  const resolved = resolveDeviceKind(kind, name);
-  const Icon = DEVICE_KIND_ICONS[resolved];
-  return (
-    <Icon
-      aria-hidden="true"
-      className="text-muted-foreground size-4 shrink-0"
-    />
   );
 }
 
@@ -505,6 +482,38 @@ export function SettingsSync() {
       }
     },
   });
+  const repairKeychainMutation = useMutation({
+    mutationKey: ["repair-keychain-access", "settings"],
+    mutationFn: async () => {
+      // A failed resume attempt should be retried once Keychain is reachable again.
+      const retryEnable =
+        e2eePreflightMutation.error !== null &&
+        isKeychainAccessError(e2eePreflightMutation.error);
+      await repairKeychainAccess();
+      setCredentialBlock(null);
+      setSyncEnabledMutation.reset();
+      e2eePreflightMutation.reset();
+      if (retryEnable) {
+        e2eePreflightMutation.mutate();
+        return;
+      }
+      const result = await applyCloudsyncPreference(session);
+      if (result === "account_mismatch") {
+        setConnectLibraryOpen(true);
+      }
+    },
+    onSettled: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["e2ee-identity", session?.user.id],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["cloudsync-status-indicator"],
+        }),
+        queryClient.invalidateQueries({ queryKey: statusQueryKey }),
+      ]);
+    },
+  });
   const syncPreferred = setSyncEnabledMutation.isPending
     ? (setSyncEnabledMutation.variables ?? storedSyncEnabled)
     : storedSyncEnabled;
@@ -705,7 +714,9 @@ export function SettingsSync() {
         description:
           credentialBlock === "setup_required"
             ? t`Set up your recovery key to start encrypted cloud sync.`
-            : t`Anarlog could not start cloud sync on this device.`,
+            : credentialBlock === "keychain_access"
+              ? t`macOS could not access your recovery key. Repair Keychain access, then resume sync.`
+              : t`Anarlog could not start cloud sync on this device.`,
       };
     }
     if (statusQuery.isError) {
@@ -804,6 +815,9 @@ export function SettingsSync() {
     setSyncEnabledMutation.error ??
     e2eePreflightMutation.error ??
     syncNowMutation.error;
+  const keychainRepairNeeded =
+    credentialBlock === "keychain_access" ||
+    (mutationError !== null && isKeychainAccessError(mutationError));
   const deviceMutationError =
     replaceDeviceMutation.error ?? removeDeviceMutation.error;
   return (
@@ -847,6 +861,9 @@ export function SettingsSync() {
               e2eeIdentityQuery.isLoading
             }
             onCheckedChange={(enabled) => {
+              // Drop the previous attempt's error so the shown error (and repair action) is this attempt's.
+              setSyncEnabledMutation.reset();
+              e2eePreflightMutation.reset();
               if (enabled) {
                 e2eePreflightMutation.mutate();
               } else {
@@ -858,6 +875,27 @@ export function SettingsSync() {
 
         {mutationError && (
           <p className="text-xs text-red-500">{mutationError.message}</p>
+        )}
+
+        {keychainRepairNeeded && (
+          <div className="flex flex-col items-start gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={repairKeychainMutation.isPending}
+              onClick={() => repairKeychainMutation.mutate()}
+            >
+              {repairKeychainMutation.isPending && (
+                <CircleNotch className="size-3.5 animate-spin" />
+              )}
+              <Trans>Repair Keychain Access</Trans>
+            </Button>
+            {repairKeychainMutation.error && (
+              <p className="text-xs text-red-500">
+                {repairKeychainMutation.error.message}
+              </p>
+            )}
+          </div>
         )}
 
         <div className="flex items-center justify-between gap-4">
@@ -960,10 +998,6 @@ export function SettingsSync() {
                 key={device.deviceFingerprint}
                 className="flex items-center gap-3 px-4 py-3"
               >
-                <DeviceKindIcon
-                  kind={device.deviceKind}
-                  name={device.deviceName}
-                />
                 <div className="min-w-0 flex-1">
                   <DeviceTitle
                     name={device.deviceName}
@@ -1023,10 +1057,6 @@ export function SettingsSync() {
                 key={device.requestId}
                 className="flex items-center gap-3 px-4 py-3"
               >
-                <DeviceKindIcon
-                  kind={device.deviceKind}
-                  name={device.deviceName}
-                />
                 <div className="min-w-0 flex-1">
                   <DeviceTitle
                     name={device.deviceName}

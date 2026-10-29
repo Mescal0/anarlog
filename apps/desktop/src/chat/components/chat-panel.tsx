@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 
 import { cn } from "@anlg/utils";
 
@@ -7,11 +7,14 @@ import { ChatContent } from "./content";
 import { ChatSession, type ChatSessionRenderProps } from "./session-provider";
 import { ChatToolbarControls } from "./toolbar-controls";
 import { useSessionTab } from "./use-session-tab";
+import { useHasEditableSummary } from "./use-summary-quick-actions";
 
 import { useLanguageModel } from "~/ai/hooks";
 import { useChatAppearance } from "~/chat/hooks/use-chat-appearance";
+import { useChatContext } from "~/chat/state/chat-context";
 import { useChatActions } from "~/chat/store/use-chat-actions";
 import { chatFloatingPanelClassNames } from "~/chat/surface";
+import type { ChatScope } from "~/chat/types";
 import { useShell } from "~/contexts/shell";
 import { useSessionHasTranscript } from "~/session/queries";
 import { useOwnerUserId } from "~/shared/owner-user";
@@ -25,14 +28,35 @@ export function ChatSessionHost({
   children: (sessionProps: ChatSessionRenderProps | null) => ReactNode;
 }) {
   const { chat } = useShell();
-  const { groupId, sessionId } = chat;
+  const [scopes, setScopes] = useState<ChatScope[]>([chat.scope]);
+  if (!scopes.includes(chat.scope)) {
+    setScopes([...scopes, chat.scope]);
+  }
+
+  return scopes.map((scope) => (
+    <ScopedChatSession key={scope} scope={scope}>
+      {(sessionProps) => (scope === chat.scope ? children(sessionProps) : null)}
+    </ScopedChatSession>
+  ));
+}
+
+function ScopedChatSession({
+  scope,
+  children,
+}: {
+  scope: ChatScope;
+  children: (sessionProps: ChatSessionRenderProps | null) => ReactNode;
+}) {
+  const { groupId, sessionId } = useChatContext(
+    (state) => state.chatByScope[scope],
+  );
   const { currentSessionId } = useSessionTab();
   const noteFilter = useSidebarNotes((state) => state.noteFilter);
   const folderFilter = useSidebarNotes((state) => state.folderFilter);
   const contextSessionId =
-    chat.scope === "automations" ? undefined : currentSessionId;
+    scope === "automations" ? undefined : currentSessionId;
   const folderId =
-    chat.scope === "automations"
+    scope === "automations"
       ? undefined
       : folderIdForNewNote(noteFilter, folderFilter);
   const ownerUserId = useOwnerUserId();
@@ -87,6 +111,17 @@ export function ChatPanelFrame({
   const { panelClassName, toolbarSurface } = useChatAppearance();
   const isFloating = layout === "floating";
   const model = useLanguageModel("chat");
+  const { currentSessionId, currentNoteView } = useSessionTab();
+  const hasSummary = useHasEditableSummary(
+    chat.scope === "automations" ? undefined : currentSessionId,
+    currentNoteView,
+  );
+  const isLiveMeeting = useListener(
+    (state) =>
+      chat.scope !== "automations" &&
+      !!currentSessionId &&
+      state.getSessionMode(currentSessionId) === "active",
+  );
 
   const handleGroupCreated = useCallback(
     (newGroupId: string) => {
@@ -153,6 +188,8 @@ export function ChatPanelFrame({
             onReload={sessionProps.regenerate}
             isModelConfigured={!!model}
             hasContext={sessionProps.contextEntities.length > 0}
+            isLiveMeeting={isLiveMeeting}
+            hasSummary={hasSummary && sessionProps.contextEntities.length > 0}
             onSendMessage={(content, parts) => {
               handleSendMessage(
                 content,

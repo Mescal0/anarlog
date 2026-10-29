@@ -201,7 +201,9 @@ export type CanStartTrialReason = 'eligible' | 'not_eligible' | 'error';
 
 export type CanStartTrialResponse = {
     canStartTrial: boolean;
+    offer?: null | TrialOffer;
     reason?: null | CanStartTrialReason;
+    trialDays?: number | null;
 };
 
 export type CanceledAttachmentBackupDeletion = {
@@ -215,6 +217,7 @@ export type CasSessionShareSnapshotRequest = {
     attachmentIds: Array<string>;
     baseRevision: number;
     body: unknown;
+    eventKey?: string | null;
     meetingAt?: string | null;
     mutationId: string;
     participants?: Array<string> | null;
@@ -1782,8 +1785,10 @@ export type StableSharedNoteSnapshot = {
 export type StartTrialReason = 'started' | 'not_eligible';
 
 export type StartTrialResponse = {
+    offer?: null | TrialOffer;
     reason?: null | StartTrialReason;
     started: boolean;
+    trialDays?: number | null;
 };
 
 export type StreamAlternatives = {
@@ -2001,6 +2006,8 @@ export type TranscriptionSegment = {
 };
 
 export type Transparency = 'opaque' | 'transparent' | 'unknown';
+
+export type TrialOffer = 'referral' | 'work_email' | 'personal_email';
 
 export type UpdateSettingsBody = {
     enabled: boolean;
@@ -4904,6 +4911,10 @@ export type PublishE2EeWitnessErrors = {
      * Witness service unavailable
      */
     502: unknown;
+    /**
+     * Publication busy; retry after the Retry-After delay
+     */
+    503: unknown;
 };
 
 export type PublishE2EeWitnessResponses = {
@@ -4950,6 +4961,10 @@ export type AcceptE2EeReplicaBatchErrors = {
      * Cloud base changed; pull and rebase
      */
     409: unknown;
+    /**
+     * Acceptance busy; retry after the Retry-After delay
+     */
+    503: unknown;
 };
 
 export type AcceptE2EeReplicaBatchResponses = {

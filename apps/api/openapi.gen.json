@@ -3622,6 +3622,9 @@
           },
           "502": {
             "description": "Witness service unavailable"
+          },
+          "503": {
+            "description": "Publication busy; retry after the Retry-After delay"
           }
         },
         "security": [
@@ -3723,6 +3726,9 @@
           },
           "409": {
             "description": "Cloud base changed; pull and rebase"
+          },
+          "503": {
+            "description": "Acceptance busy; retry after the Retry-After delay"
           }
         },
         "security": [
@@ -6466,6 +6472,16 @@
             "type": "boolean",
             "example": true
           },
+          "offer": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TrialOffer"
+              }
+            ]
+          },
           "reason": {
             "oneOf": [
               {
@@ -6475,6 +6491,15 @@
                 "$ref": "#/components/schemas/CanStartTrialReason"
               }
             ]
+          },
+          "trialDays": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "example": 30,
+            "minimum": 0
           }
         }
       },
@@ -6522,6 +6547,12 @@
             "format": "int64"
           },
           "body": {},
+          "eventKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "meetingAt": {
             "type": [
               "string",
@@ -12328,6 +12359,16 @@
           "started"
         ],
         "properties": {
+          "offer": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TrialOffer"
+              }
+            ]
+          },
           "reason": {
             "oneOf": [
               {
@@ -12341,6 +12382,15 @@
           "started": {
             "type": "boolean",
             "example": true
+          },
+          "trialDays": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "example": 30,
+            "minimum": 0
           }
         }
       },
@@ -13107,6 +13157,14 @@
           "opaque",
           "transparent",
           "unknown"
+        ]
+      },
+      "TrialOffer": {
+        "type": "string",
+        "enum": [
+          "referral",
+          "work_email",
+          "personal_email"
         ]
       },
       "UpdateSettingsBody": {

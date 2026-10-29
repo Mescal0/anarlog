@@ -17,7 +17,7 @@ import { stopActiveWelcomeDemo } from "~/onboarding/welcome-note";
 import {
   allowReconnectedCalendarConnections,
   CALENDAR_SYNC_TASK_ID,
-  removeDisconnectedCalendarConnection,
+  removeDisconnectedCalendarConnectionFromCallback,
   syncCalendarEvents,
 } from "~/services/calendar";
 import { useScheduleTaskRunCallback } from "~/services/task-scheduler";
@@ -70,9 +70,18 @@ export function useDeeplinkHandler() {
     };
     const handleDeepLink = (payload: DeepLink) => {
       if (payload.to === "/auth/callback") {
-        const { access_token, refresh_token } = payload.search;
+        const { access_token, refresh_token, state } = payload.search;
         if (access_token && refresh_token) {
-          authCallbackHandler(access_token, refresh_token);
+          void authCallbackHandler(
+            access_token,
+            refresh_token,
+            state ?? undefined,
+          ).catch((error) => {
+            console.error(
+              "[auth] sign-in failed; retry the callback or start sign-in again",
+              error,
+            );
+          });
         }
       } else if (payload.to === "/billing/refresh") {
         void authRef.current.refreshSession();
@@ -99,7 +108,7 @@ export function useDeeplinkHandler() {
           console.log(`[deeplink] integration updated: ${integration_id}`);
           if (disconnected_connection_id) {
             invalidateIntegrationState();
-            void removeDisconnectedCalendarConnection(
+            void removeDisconnectedCalendarConnectionFromCallback(
               integration_id,
               disconnected_connection_id,
             )

@@ -16,8 +16,8 @@ in the child skills refer to `.github/workflows/`.
 
 ## Scope and authorization
 
-- For desktop preparation or publication, require the user's explicit stable
-  desktop version. For mobile-only distribution, require the mobile version and
+- For desktop preparation or publication, select the stable version using the
+  policy below; the user does not need to supply a version. For mobile-only distribution, require the mobile version and
   explicit store destination; no desktop version or desktop release work is required.
   Publish only a verified candidate merged into `main`, never the combined
   GitButler workspace. Nightly publication is retired; preserve historical tags
@@ -35,11 +35,30 @@ in the child skills refer to `.github/workflows/`.
   reason, or explicit user deferral with impact. Do not redeploy unchanged services
   merely to refresh timestamps. A website build before desktop publication cannot
   expose the new changelog and is not reusable evidence for that publication step.
-- Preserve the 2–3 working-day candidate use period, final stable package checks,
-  exact source/provenance requirements, and downgrade compatibility in the desktop
-  procedure. Honor an explicit owner exception without claiming the skipped checks
-  occurred. Broad QA through `qa-critical-ux` or `qa-cli-mcp-api` is separate and runs
+- Preserve final stable package checks, exact source/provenance requirements,
+  and downgrade compatibility in the desktop procedure. Proceed with publication
+  when the required technical release gates pass. Broad QA through
+  `qa-critical-ux` or `qa-cli-mcp-api` is separate and runs
   only when requested; packaging and release verification remain required.
+
+## Desktop version selection
+
+- Honor a version supplied by the user. When continuing this release, reuse its
+  recorded version rather than selecting another one on each run.
+- Otherwise, query GitHub releases and select the next patch after the highest
+  published, non-draft, non-prerelease `desktop_v<major>.<minor>.<patch>` version.
+  Paginate as needed; ignore mobile, Nightly, draft, and prerelease entries.
+  For example, `desktop_v1.4.32` selects `1.4.33`.
+- State the selected version and baseline, record them in the release issue,
+  and proceed without confirmation. Do not infer a minor or major bump from
+  the size of the diff or use the combined workspace's version as the baseline.
+- Check existing release issues, preparation PRs, drafts, and tags for the
+  selected version. Resume matching work; ask only when the baseline cannot be
+  verified or conflicting release ownership/version intent needs a decision.
+  Never overwrite a published release or move an immutable tag.
+- Pass the selected exact version to the version script and every release
+  workflow. Automatic selection does not change publication authorization,
+  candidate verification, or any other release gate.
 
 ## Release Surface Review
 
@@ -63,7 +82,7 @@ candidate/published revisions, checks, live or artifact evidence, and unresolved
 
 ## Execution order
 
-1. Record the requested version, platforms/channel, prior published versions, and
+1. Record the selected version, platforms/channel, prior published versions, and
    candidate source in the matching Linear release issue. Follow
    [Anarlog workflow](../anarlog-workflow/SKILL.md); keep one release record.
 2. Read the five surface skills and current workflows. Implement and validate
@@ -73,7 +92,7 @@ candidate/published revisions, checks, live or artifact evidence, and unresolved
    Merge release preparation to `main`, then freeze its exact SHA. A new source change requires renewed affected
    verification; do not mix runs or artifacts from different candidates.
 3. When desktop is in scope, follow [Desktop release procedures](references/desktop.md) for native CI,
-   CloudSync source rebuilds, staging use, first-attempt stable dry run, packaged
+   CloudSync source rebuilds, staging verification, first-attempt stable dry run, packaged
    verification, upgrade/restart, immutable tags, and publication. Follow
    [Mobile store distribution](references/mobile.md) only when requested.
 4. Publish required backward-compatible hosted dependencies through Release API
@@ -97,8 +116,8 @@ rather than duplicate routine comments. For mobile-only distribution, mark deskt
 version, staging, artifacts, Desktop changelog, and desktop store checks not applicable;
 review affected shared surfaces and complete the mobile checks.
 
-- Explicit stable version, candidate SHA, staging run and actual-use evidence,
-  owner exceptions, first-attempt dry-run and publish URLs/head SHAs.
+- Selected exact stable version and baseline, candidate SHA, staging run and verification evidence,
+  first-attempt dry-run and publish URLs/head SHAs.
 - Immutable `desktop_v<version>` tag, GitHub/CrabNebula publication, asset
   hashes/signatures, final stable install/upgrade/restart, and updater/download routes.
 - Packaged CLI version on each shipped platform, installer/update resolution,

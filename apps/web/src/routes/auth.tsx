@@ -2,6 +2,7 @@ import { useMutation } from "@tanstack/react-query";
 import { createFileRoute, Link, redirect } from "@tanstack/react-router";
 import { useRef, useState, type ReactNode } from "react";
 
+import { WORK_EMAIL_PRO_TRIAL_DAYS } from "@anlg/pricing/trial";
 import { ArrowLeft, Buildings, Envelope } from "@anlg/ui/components/icons";
 import { cn } from "@anlg/utils";
 
@@ -30,6 +31,7 @@ import {
 } from "@/functions/desktop-flow";
 import { useMountEffect } from "@/hooks/useMountEffect";
 import {
+  resolveAuthFlowContext,
   shouldReuseBrowserSession,
   toAuthFlowSearch,
 } from "@/lib/auth-flow-context";
@@ -38,19 +40,23 @@ import {
   buildPostAuthDestination,
   sanitizeInternalReturnPath,
 } from "@/lib/auth-redirect";
+import { storeDesktopAuthHandoff } from "@/lib/auth-route-privacy";
 import {
   buildDesktopAuthCallbackPath,
   resolveDesktopAuthCallbackMethod,
 } from "@/lib/desktop-auth-handoff";
 import { capturePrivateRouteEvent } from "@/lib/private-route-analytics";
+import { rememberAuthFlowContext } from "@/lib/root-auth-callback";
 
 export const Route = createFileRoute("/auth")({
+  ssr: false,
   validateSearch: authSearchSchema,
   component: Component,
   head: () => ({
     meta: [{ name: "robots", content: "noindex, nofollow" }],
   }),
   beforeLoad: async ({ search }) => {
+    rememberAuthFlowContext(resolveAuthFlowContext(search));
     const [user, lastSignInMethod] = await Promise.all([
       shouldReuseBrowserSession(search) ? fetchUser() : null,
       fetchLastSignInMethod(),
@@ -67,14 +73,20 @@ export const Route = createFileRoute("/auth")({
         const result = await createDesktopSession();
 
         if (result) {
+          storeDesktopAuthHandoff(
+            result.access_token,
+            result.refresh_token,
+            Date.now(),
+            search.desktop_state,
+          );
           throw redirect({
             to: "/callback/auth/",
             search: {
               flow: "desktop",
+              handoff: "stored",
               scheme: search.scheme ?? DEFAULT_DESKTOP_SCHEME,
-              access_token: result.access_token,
-              refresh_token: result.refresh_token,
               method: search.provider ?? search.view,
+              desktop_state: search.desktop_state,
             },
           });
         }
@@ -105,6 +117,7 @@ function Component() {
   const {
     flow,
     scheme,
+    desktop_state,
     redirect,
     provider,
     view: initialView,
@@ -130,6 +143,7 @@ function Component() {
         <DesktopReauthView
           email={existingUser.email}
           scheme={scheme ?? DEFAULT_DESKTOP_SCHEME}
+          desktop_state={desktop_state}
           callbackMethod={resolveDesktopAuthCallbackMethod(
             provider ?? initialView,
             lastSignInMethod,
@@ -150,21 +164,13 @@ function Component() {
     <AuthShell title="Welcome to Anarlog" showEyebrow={false}>
       {view === "main" && (
         <>
+          <TrialOfferCard />
           <div className="flex flex-col gap-3">
-            {showApple && (
-              <OAuthButton
-                flow={flow}
-                scheme={scheme}
-                redirect={redirect}
-                provider="apple"
-                autoStart={autoStartOAuth}
-                isLastUsed={lastSignInMethod === "apple"}
-              />
-            )}
             {showGoogle && (
               <OAuthButton
                 flow={flow}
                 scheme={scheme}
+                desktop_state={desktop_state}
                 redirect={redirect}
                 provider="google"
                 autoStart={autoStartOAuth}
@@ -175,37 +181,12 @@ function Component() {
               <OAuthButton
                 flow={flow}
                 scheme={scheme}
+                desktop_state={desktop_state}
                 redirect={redirect}
                 provider="azure"
                 autoStart={autoStartOAuth}
                 isLastUsed={lastSignInMethod === "azure"}
               />
-            )}
-            {showGithub && (
-              <OAuthButton
-                flow={flow}
-                scheme={scheme}
-                redirect={redirect}
-                provider="github"
-                autoStart={autoStartOAuth}
-                isLastUsed={lastSignInMethod === "github"}
-              />
-            )}
-            {showEmail && (
-              <AuthMethodButton isLastUsed={lastSignInMethod === "email"}>
-                <button
-                  onClick={() => setView("email")}
-                  className={authSecondaryButtonClassName}
-                >
-                  <AuthProviderContent
-                    icon={
-                      <Envelope className="size-[18px]" aria-hidden="true" />
-                    }
-                  >
-                    Sign in with Email
-                  </AuthProviderContent>
-                </button>
-              </AuthMethodButton>
             )}
             {showEmail && (
               <AuthMethodButton isLastUsed={lastSignInMethod === "sso"}>
@@ -223,6 +204,44 @@ function Component() {
                 </button>
               </AuthMethodButton>
             )}
+            {showEmail && (
+              <AuthMethodButton isLastUsed={lastSignInMethod === "email"}>
+                <button
+                  onClick={() => setView("email")}
+                  className={authSecondaryButtonClassName}
+                >
+                  <AuthProviderContent
+                    icon={
+                      <Envelope className="size-[18px]" aria-hidden="true" />
+                    }
+                  >
+                    Sign in with Email
+                  </AuthProviderContent>
+                </button>
+              </AuthMethodButton>
+            )}
+            {showApple && (
+              <OAuthButton
+                flow={flow}
+                scheme={scheme}
+                desktop_state={desktop_state}
+                redirect={redirect}
+                provider="apple"
+                autoStart={autoStartOAuth}
+                isLastUsed={lastSignInMethod === "apple"}
+              />
+            )}
+            {showGithub && (
+              <OAuthButton
+                flow={flow}
+                scheme={scheme}
+                desktop_state={desktop_state}
+                redirect={redirect}
+                provider="github"
+                autoStart={autoStartOAuth}
+                isLastUsed={lastSignInMethod === "github"}
+              />
+            )}
           </div>
           <LegalText />
         </>
@@ -231,6 +250,7 @@ function Component() {
         <EmailAuthView
           flow={flow}
           scheme={scheme}
+          desktop_state={desktop_state}
           redirect={redirect}
           onBack={() => setView("main")}
         />
@@ -239,6 +259,7 @@ function Component() {
         <SsoAuthView
           flow={flow}
           scheme={scheme}
+          desktop_state={desktop_state}
           redirect={redirect}
           onBack={() => setView("main")}
         />
@@ -250,11 +271,13 @@ function Component() {
 function DesktopReauthView({
   email,
   scheme,
+  desktop_state,
   callbackMethod,
   lastSignInMethod,
 }: {
   email: string;
   scheme: DesktopScheme;
+  desktop_state?: string;
   callbackMethod: AuthSignInMethod | undefined;
   lastSignInMethod: AuthSignInMethod | null;
 }) {
@@ -273,6 +296,7 @@ function DesktopReauthView({
           result.refresh_token,
           scheme,
           callbackMethod,
+          desktop_state,
         );
       }
     },
@@ -315,28 +339,36 @@ function DesktopReauthView({
             <OAuthButton
               flow="desktop"
               scheme={scheme}
+              desktop_state={desktop_state}
               provider="apple"
               isLastUsed={lastSignInMethod === "apple"}
             />
             <OAuthButton
               flow="desktop"
               scheme={scheme}
+              desktop_state={desktop_state}
               provider="google"
               isLastUsed={lastSignInMethod === "google"}
             />
             <OAuthButton
               flow="desktop"
               scheme={scheme}
+              desktop_state={desktop_state}
               provider="azure"
               isLastUsed={lastSignInMethod === "azure"}
             />
             <OAuthButton
               flow="desktop"
               scheme={scheme}
+              desktop_state={desktop_state}
               provider="github"
               isLastUsed={lastSignInMethod === "github"}
             />
-            <SsoAuthView flow="desktop" scheme={scheme} />
+            <SsoAuthView
+              flow="desktop"
+              scheme={scheme}
+              desktop_state={desktop_state}
+            />
           </div>
         </>
       )}
@@ -371,11 +403,13 @@ type EmailMode = "password" | "magic-link";
 function EmailAuthView({
   flow,
   scheme,
+  desktop_state,
   redirect,
   onBack,
 }: {
   flow: "desktop" | "web";
   scheme?: DesktopScheme;
+  desktop_state?: string;
   redirect?: string;
   onBack: () => void;
 }) {
@@ -417,10 +451,20 @@ function EmailAuthView({
       </div>
 
       {mode === "password" && (
-        <PasswordForm flow={flow} scheme={scheme} redirect={redirect} />
+        <PasswordForm
+          flow={flow}
+          scheme={scheme}
+          desktop_state={desktop_state}
+          redirect={redirect}
+        />
       )}
       {mode === "magic-link" && (
-        <MagicLinkForm flow={flow} scheme={scheme} redirect={redirect} />
+        <MagicLinkForm
+          flow={flow}
+          scheme={scheme}
+          desktop_state={desktop_state}
+          redirect={redirect}
+        />
       )}
 
       <LegalText />
@@ -431,11 +475,13 @@ function EmailAuthView({
 function SsoAuthView({
   flow,
   scheme,
+  desktop_state,
   redirect,
   onBack,
 }: {
   flow: "desktop" | "web";
   scheme?: DesktopScheme;
+  desktop_state?: string;
   redirect?: string;
   onBack?: () => void;
 }) {
@@ -451,6 +497,7 @@ function SsoAuthView({
           domain,
           flow,
           scheme,
+          desktop_state,
           redirect,
         },
       });
@@ -522,10 +569,12 @@ function SsoAuthView({
 function PasswordForm({
   flow,
   scheme,
+  desktop_state,
   redirect,
 }: {
   flow: "desktop" | "web";
   scheme?: DesktopScheme;
+  desktop_state?: string;
   redirect?: string;
 }) {
   const [name, setName] = useState("");
@@ -551,6 +600,7 @@ function PasswordForm({
           password,
           flow,
           scheme,
+          desktop_state,
           redirect,
           ...(captchaToken ? { captchaToken } : {}),
         },
@@ -587,6 +637,7 @@ function PasswordForm({
           result.refresh_token as string,
           flow,
           scheme,
+          desktop_state,
           redirect,
           false,
         );
@@ -616,6 +667,7 @@ function PasswordForm({
           password,
           flow,
           scheme,
+          desktop_state,
           redirect,
           ...(captchaToken ? { captchaToken } : {}),
         },
@@ -657,6 +709,7 @@ function PasswordForm({
             result.refresh_token as string,
             flow,
             scheme,
+            desktop_state,
             redirect,
             "newAccount" in result && result.newAccount,
           );
@@ -798,7 +851,7 @@ function PasswordForm({
         {!isSignUp && (
           <Link
             to="/reset-password/"
-            search={toAuthFlowSearch({ flow, scheme, redirect })}
+            search={toAuthFlowSearch({ flow, scheme, desktop_state, redirect })}
             className="text-sm text-[#756b5d] transition-colors hover:text-[#181613] hover:underline"
           >
             Forgot password?
@@ -814,6 +867,7 @@ function handlePasswordSuccess(
   refreshToken: string,
   flow: "desktop" | "web",
   scheme?: DesktopScheme,
+  desktop_state?: string,
   redirectPath?: string,
   newAccount = false,
 ) {
@@ -823,6 +877,7 @@ function handlePasswordSuccess(
       refreshToken,
       scheme,
       "email",
+      desktop_state,
     );
   } else {
     window.location.href = buildPostAuthDestination({
@@ -835,10 +890,12 @@ function handlePasswordSuccess(
 function MagicLinkForm({
   flow,
   scheme,
+  desktop_state,
   redirect,
 }: {
   flow: "desktop" | "web";
   scheme?: DesktopScheme;
+  desktop_state?: string;
   redirect?: string;
 }) {
   const [email, setEmail] = useState("");
@@ -864,6 +921,7 @@ function MagicLinkForm({
           email,
           flow,
           scheme,
+          desktop_state,
           redirect,
           ...(captchaToken ? { captchaToken } : {}),
         },
@@ -994,6 +1052,7 @@ function AuthMethodButton({
 function OAuthButton({
   flow,
   scheme,
+  desktop_state,
   redirect,
   provider,
   autoStart = false,
@@ -1001,6 +1060,7 @@ function OAuthButton({
 }: {
   flow: "desktop" | "web";
   scheme?: DesktopScheme;
+  desktop_state?: string;
   redirect?: string;
   provider: OAuthProvider;
   autoStart?: boolean;
@@ -1018,6 +1078,7 @@ function OAuthButton({
           provider,
           flow,
           scheme,
+          desktop_state,
           redirect,
         },
       });
@@ -1073,5 +1134,24 @@ function OAuthButton({
         </AuthProviderContent>
       </button>
     </AuthMethodButton>
+  );
+}
+
+function TrialOfferCard() {
+  return (
+    <div className="mb-5 flex items-center gap-5 rounded-[20px] border border-amber-900/10 bg-white py-4 pr-5 pl-6 shadow-[0_12px_32px_-16px_rgba(120,53,15,0.35)]">
+      <div className="flex shrink-0 flex-col items-center">
+        <span className="font-hand text-[40px] leading-[0.9] font-semibold text-amber-800">
+          {WORK_EMAIL_PRO_TRIAL_DAYS}
+        </span>
+        <span className="mt-1 pl-[0.22em] text-[10px] font-semibold tracking-[0.22em] text-amber-800/70 uppercase">
+          days
+        </span>
+      </div>
+      <div className="h-11 w-px shrink-0 bg-amber-900/10" />
+      <span className="text-[15px] font-semibold text-stone-900">
+        Free Pro with a work email
+      </span>
+    </div>
   );
 }

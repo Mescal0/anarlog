@@ -16,18 +16,25 @@ import { queryClient } from "@/lib/query-client";
 import { showToast } from "@/lib/toast";
 import { readPreferences } from "@/settings/preferences";
 import { resolveProvider } from "@/settings/providers";
+import { isSubscriptionProvider } from "@/settings/providers-model";
 
+import { readChatgptSummary } from "./chatgpt-summary";
 import { docToPlainText, stripMarkdownTitle } from "./note-doc";
 import { summaryRequest } from "./provider-summary";
 import { PENDING_SUMMARY_PREFIX } from "./summary-job";
-import { buildSummaryPrompt, readSummaryText } from "./summary-model";
+import {
+  buildSummaryPrompt,
+  buildTitlePrompt,
+  readGeneratedTitle,
+  readSummaryText,
+} from "./summary-model";
 import {
   SESSION_TRANSCRIPTS_SQL,
   SESSION_SPEAKERS_SQL,
-  transcriptSegments,
   type TranscriptRow,
 } from "./transcript-model";
 import { readBoundedTranscriptionResponse } from "./transcription-response";
+import { renderTranscript } from "./transcripts";
 
 export class SummarySkippedError extends Error {
   readonly reason: string;
@@ -52,6 +59,11 @@ async function runSummary(
   sessionId: string,
   automatic: boolean,
 ): Promise<void> {
+  const [session] = await execute<{ title: string }>(
+    "SELECT title FROM sessions WHERE id = ? AND deleted_at IS NULL",
+    [sessionId],
+  );
+  if (!session) throw new Error("This note no longer exists.");
   const existing = await execute<{
     id: string;
     updated_at: string;
@@ -99,8 +111,7 @@ async function runSummary(
         : docToPlainText(note.body)
       ).text
     : "";
-  const names = new Map(humans.map((human) => [human.id, human.name]));
-  const segments = transcripts.flatMap((row) => transcriptSegments(row, names));
+  const segments = transcripts.flatMap((row) => renderTranscript(row, humans));
   const transcript = segments
     .map((segment) => `${segment.speaker}: ${segment.text}`)
     .join("\n");
@@ -127,46 +138,73 @@ async function runSummary(
     throw new Error(
       "This meeting is too long to summarize on mobile. Open it on desktop.",
     );
-  const request = summaryRequest(
-    provider,
+  async function generate(
+    system: string,
+    source: string,
+    task: "enhance" | "title",
+  ) {
+    const request = summaryRequest(provider, system, source, env.apiUrl, task);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120_000);
+    try {
+      const response = await fetch(request.url, {
+        method: "POST",
+        signal: controller.signal,
+        redirect: "error",
+        headers: request.headers,
+        body: JSON.stringify(request.body),
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new Error(
+          isSubscriptionProvider(provider.provider) &&
+            (response.status === 401 || response.status === 403)
+            ? "Reconnect your subscription in Settings."
+            : isSubscriptionProvider(provider.provider) &&
+                response.status === 429
+              ? "Your subscription usage limit was reached. Try again later or choose another provider."
+              : response.status === 401 || response.status === 403
+                ? "Check your provider API key or sign in again."
+                : `The summary provider could not complete the request (${response.status}).`,
+        );
+      }
+      return provider.provider === "chatgpt"
+        ? await readChatgptSummary(response)
+        : readSummaryText(
+            provider.provider,
+            JSON.parse(
+              await readBoundedTranscriptionResponse(response, 1024 * 1024),
+            ),
+          );
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  const summary = await generate(
     buildSummaryPrompt(preferences),
     source,
-    env.apiUrl,
+    "enhance",
   );
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 120_000);
-  let summary: string;
-  try {
-    const response = await fetch(request.url, {
-      method: "POST",
-      signal: controller.signal,
-      redirect: "error",
-      headers: request.headers,
-      body: JSON.stringify(request.body),
-    });
-    if (!response.ok)
-      throw new Error(
-        response.status === 401 || response.status === 403
-          ? "Check your provider API key or sign in again."
-          : `The summary provider could not complete the request (${response.status}).`,
+  let title: string | null = null;
+  if (!session.title.trim()) {
+    try {
+      title = readGeneratedTitle(
+        await generate(buildTitlePrompt(preferences), summary, "title"),
       );
-    summary = readSummaryText(
-      provider.provider,
-      JSON.parse(await readBoundedTranscriptionResponse(response, 1024 * 1024)),
-    );
-  } finally {
-    clearTimeout(timeout);
+    } catch {
+      // A title is optional; preserve the completed summary if its request fails.
+    }
   }
   const now = nowIso();
   const metadata = JSON.stringify({
     provider: provider.provider,
     model: provider.model,
     language: preferences.ai_language,
-    summary_length: preferences.summary_length,
   });
   const [changed] = await executeTransaction([
     target
       ? {
+          expectedRowsAffected: 1,
           sql: `UPDATE session_documents SET body = ?, body_format = 'markdown', generation_metadata_json = ?, updated_at = ?, deleted_at = NULL
       WHERE id = ? AND session_id = ? AND updated_at = ? AND body = ? AND deleted_at IS ?
         AND EXISTS (SELECT 1 FROM sessions WHERE id = ? AND deleted_at IS NULL)`,
@@ -183,6 +221,7 @@ async function runSummary(
           ],
         }
       : {
+          expectedRowsAffected: 1,
           sql: `INSERT INTO session_documents (id, workspace_id, session_id, kind, title, body_format, body, generation_metadata_json, created_at, updated_at)
       SELECT ?, workspace_id, id, 'summary', 'Summary', 'markdown', ?, ?, ?, ? FROM sessions WHERE id = ? AND deleted_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM session_documents WHERE session_id = ? AND kind IN ('summary', 'template_output') AND deleted_at IS NULL)
@@ -197,6 +236,14 @@ async function runSummary(
             sessionId,
           ],
         },
+    ...(title
+      ? [
+          {
+            sql: "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ? AND title = ? AND deleted_at IS NULL",
+            params: [title, now, sessionId, session.title],
+          },
+        ]
+      : []),
   ]);
   if (changed !== 1)
     throw new Error(

@@ -14,13 +14,15 @@ use super::*;
 
 #[derive(Clone, Default)]
 struct RateLimitedOnce {
+    status: u16,
     requests: Arc<AtomicUsize>,
 }
 
 impl Respond for RateLimitedOnce {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
         if self.requests.fetch_add(1, Ordering::Relaxed) == 0 {
-            return ResponseTemplate::new(429).insert_header("retry-after", "0");
+            return ResponseTemplate::new(if self.status == 0 { 429 } else { self.status })
+                .insert_header("retry-after", "0");
         }
         ResponseTemplate::new(200).set_body_json(json!({
             "initialized": true,
@@ -192,13 +194,65 @@ fn cancelled_replica_work_is_reported_as_an_interrupted_witness_operation() {
 }
 
 #[tokio::test]
-async fn retries_a_rate_limited_witness_read() {
+async fn retries_rate_limited_and_busy_witness_reads() {
+    for status in [429, 503] {
+        let server = MockServer::start().await;
+        let responder = RateLimitedOnce {
+            status,
+            ..Default::default()
+        };
+        Mock::given(method("GET"))
+            .and(path("/sync/e2ee/witness/user-a"))
+            .respond_with(responder.clone())
+            .expect(2)
+            .mount(&server)
+            .await;
+        let client = E2eeWitnessClient::new(
+            E2eeWitnessConfig {
+                endpoint: format!("{}/sync/e2ee/witness/user-a", server.uri()),
+                access_token: "access-token".to_string(),
+            },
+            "user-a",
+        )
+        .unwrap();
+
+        let page = client.read_page(0, None).await.unwrap();
+
+        assert_eq!(page.head_sequence, 0);
+        assert_eq!(responder.requests.load(Ordering::Relaxed), 2);
+    }
+}
+
+#[tokio::test]
+async fn witness_timeout_diagnostics_do_not_expose_the_workspace_url() {
     let server = MockServer::start().await;
-    let responder = RateLimitedOnce::default();
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(1)))
+        .mount(&server)
+        .await;
+    let mut client = E2eeWitnessClient::new(
+        E2eeWitnessConfig {
+            endpoint: format!("{}/sync/e2ee/witness/private-workspace", server.uri()),
+            access_token: "private-token".to_string(),
+        },
+        "private-workspace",
+    )
+    .unwrap();
+    client.client = http_client(std::time::Duration::from_millis(50)).unwrap();
+    let error = client.read_page(0, None).await.err().unwrap().to_string();
+    assert!(error.contains("timed out"));
+    assert!(!error.contains("private-workspace"));
+    assert!(!error.contains("private-token"));
+    assert!(!error.contains(&server.uri()));
+}
+
+#[tokio::test]
+async fn headerless_service_outages_fail_without_a_rate_limit_retry_delay() {
+    let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/sync/e2ee/witness/user-a"))
-        .respond_with(responder.clone())
-        .expect(2)
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
         .mount(&server)
         .await;
     let client = E2eeWitnessClient::new(
@@ -209,11 +263,12 @@ async fn retries_a_rate_limited_witness_read() {
         "user-a",
     )
     .unwrap();
-
-    let page = client.read_page(0, None).await.unwrap();
-
-    assert_eq!(page.head_sequence, 0);
-    assert_eq!(responder.requests.load(Ordering::Relaxed), 2);
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), client.read_page(0, None))
+        .await
+        .expect("ordinary outages must not enter the busy retry sleep")
+        .err()
+        .expect("service outage must fail");
+    assert!(error.to_string().contains("503"));
 }
 
 #[tokio::test]
@@ -1469,16 +1524,16 @@ async fn accepted_refresh_resumes_after_restart_without_exposing_partial_rows() 
 #[test]
 fn retry_after_delays_are_bounded_and_allow_immediate_test_retries() {
     let mut headers = reqwest::header::HeaderMap::new();
-    assert_eq!(retry_after_delay(&headers), DEFAULT_RETRY_AFTER);
+    assert_eq!(retry_after_delay(&headers), None);
 
     headers.insert(reqwest::header::RETRY_AFTER, "0".parse().unwrap());
-    assert!(retry_after_delay(&headers).is_zero());
+    assert_eq!(retry_after_delay(&headers), Some(std::time::Duration::ZERO));
 
     headers.insert(reqwest::header::RETRY_AFTER, "later".parse().unwrap());
-    assert_eq!(retry_after_delay(&headers), DEFAULT_RETRY_AFTER);
+    assert_eq!(retry_after_delay(&headers), None);
 
     headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
-    assert_eq!(retry_after_delay(&headers), MAX_RETRY_AFTER);
+    assert_eq!(retry_after_delay(&headers), Some(MAX_RETRY_AFTER));
 }
 
 #[tokio::test]
@@ -1694,6 +1749,137 @@ async fn accepted_sync_recovers_a_lost_receipt_without_losing_a_newer_offline_ed
 }
 
 #[tokio::test]
+async fn cloud_acceptance_preserves_offline_notes_and_speaker_conflicts_in_either_reconnect_order()
+{
+    for order in [[0, 1], [1, 0]] {
+        let server = MockServer::start().await;
+        let state = Arc::new(Mutex::new(AcceptedServer::default()));
+        Mock::given(path("/sync/e2ee/witness/user-a/accepted"))
+            .respond_with(AcceptedResponder(state))
+            .mount(&server)
+            .await;
+        let client = E2eeWitnessClient::new(
+            E2eeWitnessConfig {
+                endpoint: format!("{}/sync/e2ee/witness/user-a", server.uri()),
+                access_token: "token".into(),
+            },
+            "user-a",
+        )
+        .unwrap();
+        let key = anlg_e2ee::RecoveryKey::generate()
+            .unwrap()
+            .workspace_key("user-a")
+            .unwrap();
+        let keys = HashMap::from([("user-a".to_string(), key.clone().into())]);
+        let devices = [
+            anlg_db_core::Db::connect_memory_plain().await.unwrap(),
+            anlg_db_core::Db::connect_memory_plain().await.unwrap(),
+        ];
+        for db in &devices {
+            anlg_db_app::prepare_schema(db).await.unwrap();
+        }
+        let document = |first: &str, second: &str| {
+            json!({"type":"doc","content":
+            ([first, second].map(|text| json!({"type":"paragraph","content":[{"type":"text","text":text}]})))}).to_string()
+        };
+        let hints = |human: &str| {
+            json!([{"id":"assignment","word_id":"word","type":"user_speaker_assignment","value":{"human_id":human,"scope":"segment","word_ids":["word"]}}]).to_string()
+        };
+        let words =
+            json!([{"id":"word","text":"Keep this","start_ms":100,"end_ms":300,"channel":2}])
+                .to_string();
+        sqlx::query("INSERT INTO sessions(id,workspace_id,owner_user_id,title) VALUES('s','user-a','user-a','Meeting')").execute(devices[0].pool()).await.unwrap();
+        sqlx::query("INSERT INTO session_documents(id,workspace_id,session_id,kind,body_format,body) VALUES('s','user-a','s','note','prosemirror_json',?)")
+            .bind(document("first", "second")).execute(devices[0].pool()).await.unwrap();
+        sqlx::query("INSERT INTO transcripts(id,workspace_id,session_id,words_json,speaker_hints_json) VALUES('t','user-a','s',?,?)")
+            .bind(&words).bind(hints("original")).execute(devices[0].pool()).await.unwrap();
+        anlg_db_app::encrypt_e2ee_replica_changes(devices[0].pool(), &keys)
+            .await
+            .unwrap();
+        for db in &devices {
+            client.initialize(db.pool(), &key).await.unwrap();
+            anlg_db_app::apply_received_e2ee_replica_changes_with_witness(db.pool(), &keys, true)
+                .await
+                .unwrap();
+        }
+        // Both devices edit the same accepted baseline while disconnected.
+        for (index, db) in devices.iter().enumerate() {
+            let body = if index == 0 {
+                document("desktop edit", "second")
+            } else {
+                document("first", "phone edit")
+            };
+            sqlx::query("UPDATE session_documents SET body = ? WHERE id = 's'")
+                .bind(body)
+                .execute(db.pool())
+                .await
+                .unwrap();
+            sqlx::query("UPDATE transcripts SET speaker_hints_json = ? WHERE id = 't'")
+                .bind(hints(if index == 0 { "alice" } else { "bob" }))
+                .execute(db.pool())
+                .await
+                .unwrap();
+            anlg_db_app::encrypt_e2ee_replica_changes(db.pool(), &keys)
+                .await
+                .unwrap();
+        }
+        for index in order {
+            client
+                .publish_and_refresh(devices[index].pool(), &key)
+                .await
+                .unwrap();
+        }
+        let winner = if order[1] == 0 { "alice" } else { "bob" };
+        let loser = if order[0] == 0 { "alice" } else { "bob" };
+        // A fresh replica must reconstruct the same accepted state without device clocks.
+        let fresh = anlg_db_core::Db::connect_memory_plain().await.unwrap();
+        anlg_db_app::prepare_schema(&fresh).await.unwrap();
+        client.initialize(fresh.pool(), &key).await.unwrap();
+        for db in [&devices[0], &devices[1], &fresh] {
+            client.refresh(db.pool(), &key).await.unwrap();
+            anlg_db_app::apply_received_e2ee_replica_changes_with_witness(db.pool(), &keys, true)
+                .await
+                .unwrap();
+            let (body, stored_words, stored_hints): (String, String, String) = sqlx::query_as(
+                "SELECT d.body,t.words_json,t.speaker_hints_json FROM session_documents d JOIN transcripts t ON t.session_id=d.session_id WHERE d.id='s' AND d.deleted_at IS NULL AND t.deleted_at IS NULL")
+                .fetch_one(db.pool()).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                serde_json::from_str::<serde_json::Value>(&document("desktop edit", "phone edit"))
+                    .unwrap()
+            );
+            assert_eq!(stored_words, words);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&stored_hints).unwrap(),
+                serde_json::from_str::<serde_json::Value>(&hints(winner)).unwrap()
+            );
+            assert!(
+                anlg_db_app::pending_e2ee_cloud_batch(db.pool(), "user-a", false)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let conflicts = anlg_db_app::list_e2ee_field_conflicts(
+            devices[order[1]].pool(),
+            "transcripts",
+            "t",
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c.field_name == "speaker_hints_json"
+                    && serde_json::from_str::<serde_json::Value>(&c.value_json).unwrap()
+                        == json!(hints(loser))),
+            "the displaced assignment must remain recoverable"
+        );
+    }
+}
+
+#[tokio::test]
 async fn running_legacy_clients_reprobe_after_cloud_cutover() {
     for pending_edit in [false, true] {
         let server = MockServer::start().await;
@@ -1773,4 +1959,54 @@ async fn running_legacy_clients_reprobe_after_cloud_cutover() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn a_slow_witness_page_outlasts_the_idle_timeout_while_bytes_arrive() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let body = serde_json::to_vec(&json!({
+        "initialized": true,
+        "initializedAt": "2026-07-17T00:00:00Z",
+        "headSequence": 0,
+        "throughSequence": 0,
+        "nextAfterSequence": 0,
+        "events": [],
+    }))
+    .unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).await.unwrap();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        for chunk in body.chunks(body.len().div_ceil(8)) {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            socket.write_all(chunk).await.unwrap();
+        }
+    });
+    let mut client = E2eeWitnessClient::new(
+        E2eeWitnessConfig {
+            endpoint: format!("http://{address}/sync/e2ee/witness/user-a"),
+            access_token: "access-token".to_string(),
+        },
+        "user-a",
+    )
+    .unwrap();
+    client.client = http_client(std::time::Duration::from_millis(300)).unwrap();
+    client.accepted_support.store(1, Ordering::Release);
+
+    let page = client.read_page(0, None).await.unwrap();
+
+    assert_eq!(page.head_sequence, 0);
 }

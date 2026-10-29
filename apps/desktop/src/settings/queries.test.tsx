@@ -160,6 +160,16 @@ describe("SQLite settings", () => {
 
   it.each([
     {
+      key: "primary_recording_device",
+      value: "work-device",
+      table: "synced_preferences",
+    },
+    {
+      key: "primary_recording_device",
+      value: "",
+      table: "synced_preferences",
+    },
+    {
       key: "use_24_hour_time",
       value: true,
       table: "synced_preferences",
@@ -180,13 +190,13 @@ describe("SQLite settings", () => {
       table: "app_settings",
     },
     {
-      key: "summary_length",
-      value: "crisp",
+      key: "consent_auto_send_chat",
+      value: false,
       table: "app_settings",
     },
     {
-      key: "consent_auto_send_chat",
-      value: false,
+      key: "summary_use_main_language",
+      value: true,
       table: "app_settings",
     },
   ] as const)(

@@ -15,6 +15,7 @@ import { DictationLifecycle } from "~/dictation/lifecycle";
 import { takePendingWelcomeSession } from "~/onboarding/welcome-note";
 import { useSearchEngine } from "~/search/contexts/engine";
 import { initEnhancerService } from "~/services/enhancer";
+import { FolderDefaultAccessRunner } from "~/session-sharing/folder-default-access-runner";
 import { OwnedSharedNotePublisher } from "~/session-sharing/sync";
 import { SharedAttachmentCacheLifecycle } from "~/shared-notes/attachment-cache-lifecycle";
 import { SharedNotePreviewAuthLifecycle } from "~/shared-notes/preview";
@@ -25,6 +26,7 @@ import { folderIdForNewNote, useSidebarNotes } from "~/sidebar/note-filter";
 import { useTabs } from "~/store/zustand/tabs";
 import { BatchTranscriptionRecovery } from "~/stt/batch-transcription-recovery";
 import { LiveCaptureRecovery } from "~/stt/live-capture-recovery";
+import { RecordingImportWorker } from "~/stt/recording-import";
 import { ScheduledMeetingAutoStart } from "~/stt/scheduled-auto-start";
 import { MainListenerControlBridge } from "~/stt/window-control";
 
@@ -58,9 +60,11 @@ export function ClassicMainServices() {
       <DurableSharedNoteCacheSync />
       <SharedAttachmentCacheLifecycle />
       <OwnedSharedNotePublisher />
+      <FolderDefaultAccessRunner />
       <SharedNotePreviewAuthLifecycle />
       <LiveCaptureRecovery />
       <BatchTranscriptionRecovery />
+      <RecordingImportWorker />
       <ScheduledMeetingAutoStart />
       <MainListenerControlBridge />
       <DictationLifecycle />

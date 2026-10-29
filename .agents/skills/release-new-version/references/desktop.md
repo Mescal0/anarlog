@@ -18,11 +18,10 @@ Do not trigger a stable release from an unmerged branch. Complete the coordinato
   artifacts from `desktop_cd.yaml` with `channel=staging` for candidate testing.
   Staging has a separate profile; do not reset or copy a user's live database
   merely to prepare a release.
-- Target weekly ordinary stable releases. Pin the team to the exact candidate
-  for 2–3 working days and record real meeting results. Disable automatic
-  updates while testing. CI or elapsed time alone is not evidence of use.
-  Confirm recording/transcription, saved notes after restart, sync, and
-  stable-to-candidate upgrades on shipped platforms.
+- Target weekly ordinary stable releases. Verify the exact candidate through
+  required CI, staging checks, and final stable package checks. Disable automatic
+  updates while testing and record results for affected behavior. Proceed with
+  publication when the required technical release gates pass.
 - One release owner records the candidate SHA, staging build/run, testing
   results, unresolved issues, and go/no-go decision in the release task. A
   serious regression postpones publication. Candidate fixes require renewed
@@ -31,8 +30,7 @@ Do not trigger a stable release from an unmerged branch. Complete the coordinato
   package's install/upgrade behavior before publication; do not present staging
   as byte-identical to stable.
 - For an urgent stable hotfix, carry the minimal patch from the latest stable
-  tag into main and verify it. Record the owner's explicit exception to the
-  usual testing period; do not bundle unrelated work.
+  tag into main and verify it; do not bundle unrelated work.
 - Shared APIs and synced data must stay compatible with existing stable clients.
   Keep schema changes additive and downgrade-safe (see root `AGENTS.md`),
   including compatibility with existing Nightly installations that share the
@@ -80,7 +78,8 @@ cat .github/workflows/web_ci.yaml
 cat .github/workflows/web_cd.yaml
 ```
 
-2. Validate the explicit stable version requested by the user:
+2. Select the stable version using the coordinator's
+   [desktop version policy](../SKILL.md#desktop-version-selection), then validate it:
 
 ```bash
 VERSION=<version>
@@ -90,7 +89,8 @@ node scripts/release-version.mjs --check "$VERSION"
 test -f "packages/changelog/content/desktop/$VERSION.md"
 ```
 
-Stable desktop releases never infer a version. The workflow requires the exact
+The user may supply a version; otherwise use the next patch after the latest
+published stable desktop release. The workflow still requires the selected exact
 stable semantic version to match `release-version.json` and a changelog file.
 The version command also regenerates `apps/watch/apple/Version.xcconfig`;
 commit both desktop version files with the release preparation changes. Expo
@@ -122,7 +122,7 @@ validation passes:
 4. Merge the release preparation PRs to `main`.
 5. Verify `main` contains the changelog and all required surface updates.
 6. Record the resulting `main` SHA as the candidate and use `CANDIDATE_REF=main`.
-7. Complete staging candidate testing before building stable. Verify main still
+7. Complete required staging checks before building stable. Verify main still
    equals that SHA before every dispatch; an advanced head needs fresh candidate
    verification, not reuse of another commit's evidence.
 
@@ -157,7 +157,7 @@ both macOS architectures, Windows, and both Linux architectures. Pull-request
 runs skip the desktop native jobs. Require both CLI jobs and the API job to pass
 for this candidate as well. Keep the candidate fixed through publication.
 
-After candidate testing, verify the candidate still equals main,
+After candidate verification, verify the candidate still equals main,
 then build the stable candidate without publishing:
 
 ```bash
@@ -187,7 +187,7 @@ first-attempt run IDs so evidence cannot be mixed across attempts.
 
 The dry-run workflow must:
 
-- use the exact explicit stable version
+- use the selected exact stable version
 - build both Apple Silicon and Intel macOS artifacts
 - build the signed Windows and Linux artifacts for the same version and commit
 - upload a draft CrabNebula release without publishing it

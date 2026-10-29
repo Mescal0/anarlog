@@ -505,6 +505,7 @@ function makeHuman(): HumanRecord {
     pinOrder: null,
     avatarDataUrl: null,
     summary: null,
+    additionalEmails: [],
   };
 }
 
@@ -551,6 +552,9 @@ function makeSnapshot({
     eventId: null,
     rawNoteId: null,
     rawTemplateId: "",
+    rawUpdatedAt: "",
+    rawHeadingsUpdatedAt: "",
+    rawAppliedTemplate: null,
     rawContent: "",
     rawContentFormat: "markdown",
     rawMarkdown: "",

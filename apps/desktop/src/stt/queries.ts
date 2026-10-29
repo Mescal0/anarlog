@@ -29,6 +29,8 @@ import {
 } from "~/stt/utils";
 
 type TranscriptSqlRow = {
+  source?: string;
+  provider?: string;
   id: string;
   owner_user_id: string;
   session_id: string;
@@ -77,6 +79,8 @@ type TranscriptInsert = {
 };
 
 export type TranscriptRecord = {
+  source?: string;
+  provider?: string;
   id: string;
   ownerUserId: string;
   sessionId: string;
@@ -100,6 +104,8 @@ const EMPTY_IDS: string[] = [];
 const EMPTY_HUMANS: RenderTranscriptHuman[] = [];
 
 const TRANSCRIPT_COLUMNS = `
+  transcript.source,
+  transcript.provider,
   transcript.id,
   transcript.owner_user_id,
   transcript.session_id,
@@ -120,6 +126,8 @@ const TRANSCRIPT_COLUMNS = `
 `;
 
 const TRANSCRIPT_BASE_COLUMNS = `
+  transcript.source,
+  transcript.provider,
   transcript.id,
   transcript.owner_user_id,
   transcript.session_id,
@@ -321,11 +329,27 @@ const SESSION_REMOTE_PARTICIPANT_IDS_SQL = `
             WHERE session.id = participant.session_id
               AND (
                 (
-                  NULLIF(lower(self_human.email), '') IS NOT NULL
-                  AND lower(self_human.email) = lower(COALESCE(
-                    NULLIF(human.email, ''),
-                    participant.email
-                  ))
+                  (
+                    NULLIF(lower(self_human.email), '') IS NOT NULL
+                    AND lower(self_human.email) = lower(COALESCE(
+                      NULLIF(human.email, ''),
+                      participant.email
+                    ))
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM json_each(CASE
+                        WHEN json_valid(self_human.metadata_json)
+                          AND json_type(self_human.metadata_json, '$.additionalEmails') = 'array'
+                        THEN json_extract(self_human.metadata_json, '$.additionalEmails')
+                        ELSE '[]'
+                      END) AS self_additional_email
+                      WHERE lower(self_additional_email.value) = lower(COALESCE(
+                        NULLIF(human.email, ''),
+                        participant.email
+                      ))
+                    )
+                  )
                 )
                 OR (
                   NULLIF(lower(owner_participant.email), '') IS NOT NULL
@@ -928,6 +952,8 @@ function mapTranscriptRow(row: TranscriptSqlRow): TranscriptRecord {
     row.pending_deltas_json,
   );
   return {
+    ...(row.source ? { source: row.source } : {}),
+    ...(row.provider ? { provider: row.provider } : {}),
     id: row.id,
     ownerUserId: row.owner_user_id,
     sessionId: row.session_id,

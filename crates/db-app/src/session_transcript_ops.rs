@@ -5,6 +5,8 @@ use crate::transcript_batch_ops::load_pending_delta_jsons;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRenderTranscriptRow {
     pub id: String,
+    pub source: String,
+    pub provider: String,
     pub started_at_ms: i64,
     pub ended_at_ms: Option<i64>,
     pub words_json: String,
@@ -17,7 +19,7 @@ pub async fn load_session_render_transcripts(
     session_id: &str,
 ) -> Result<Vec<SessionRenderTranscriptRow>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, started_at_ms, ended_at_ms, words_json, speaker_hints_json
+        "SELECT id, source, provider, started_at_ms, ended_at_ms, words_json, speaker_hints_json
          FROM transcripts
          WHERE session_id = ? AND deleted_at IS NULL
          ORDER BY started_at_ms, id",
@@ -32,6 +34,8 @@ pub async fn load_session_render_transcripts(
         let pending_delta_jsons = load_pending_delta_jsons(conn, &id).await?;
         transcripts.push(SessionRenderTranscriptRow {
             id,
+            source: row.try_get("source")?,
+            provider: row.try_get("provider")?,
             started_at_ms: row.try_get("started_at_ms")?,
             ended_at_ms: row.try_get("ended_at_ms")?,
             words_json: row.try_get("words_json")?,
@@ -46,7 +50,7 @@ pub async fn load_session_render_participant_ids(
     conn: &mut SqliteConnection,
     session_id: &str,
 ) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar(
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT participant.human_id
          FROM session_participants AS participant
          JOIN sessions AS session ON session.id = participant.session_id
@@ -66,12 +70,14 @@ pub async fn load_session_render_participant_ids(
                FROM humans AS self_human
                WHERE self_human.id = session.owner_user_id
                  AND self_human.deleted_at IS NULL
-                 AND NULLIF(lower(self_human.email), '') IS NOT NULL
-                 AND lower(self_human.email) =
-                     lower(COALESCE(NULLIF(human.email, ''), participant.email))
+                 AND {}
              )
            )",
-    )
+        crate::human_has_email_nonempty_primary_sql(
+            "self_human",
+            "COALESCE(NULLIF(human.email, ''), participant.email)"
+        )
+    )))
     .bind(session_id)
     .fetch_all(&mut *conn)
     .await
@@ -145,6 +151,30 @@ mod tests {
     #[tokio::test]
     async fn session_render_participants_exclude_source_and_self_email_duplicates() {
         let db = test_db().await;
+        let mut conn = db.pool().acquire().await.unwrap();
+
+        let participant_ids = load_session_render_participant_ids(&mut conn, "session-1")
+            .await
+            .unwrap();
+
+        assert_eq!(participant_ids, vec!["participant-human"]);
+    }
+
+    #[tokio::test]
+    async fn session_render_participants_match_owner_additional_email_with_empty_primary() {
+        let db = test_db().await;
+        sqlx::query(
+            "UPDATE humans SET email = '', metadata_json = json_object('additionalEmails', json_array('owner-alias@example.com')) WHERE id = 'owner-human'",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE humans SET email = 'Owner-Alias@example.com' WHERE id = 'duplicate-self'",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
         let mut conn = db.pool().acquire().await.unwrap();
 
         let participant_ids = load_session_render_participant_ids(&mut conn, "session-1")
